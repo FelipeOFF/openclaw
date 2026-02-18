@@ -65,7 +65,7 @@ export async function runAgentStep(params: {
   const stepRunId = typeof response?.runId === "string" && response.runId ? response.runId : "";
   const resolvedRunId = stepRunId || stepIdem;
   const stepWaitMs = Math.min(params.timeoutMs, 60_000);
-  const wait = await callGateway<{ status?: string }>({
+  const wait = await callGateway<{ status?: string; finalAssistantText?: string }>({
     method: "agent.wait",
     params: {
       runId: resolvedRunId,
@@ -76,5 +76,8 @@ export async function runAgentStep(params: {
   if (wait?.status !== "ok") {
     return undefined;
   }
-  return await readLatestAssistantReply({ sessionKey: params.sessionKey });
+  if (typeof wait?.finalAssistantText === "string" && wait.finalAssistantText.trim()) {
+    return wait.finalAssistantText;
+  }
+  return await readLatestReply({ sessionKey: params.sessionKey });
 }

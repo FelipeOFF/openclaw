@@ -1,5 +1,6 @@
-import crypto from "node:crypto";
 import { Type } from "@sinclair/typebox";
+import crypto from "node:crypto";
+import type { AnyAgentTool } from "./common.js";
 import { loadConfig } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
 import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
@@ -9,7 +10,6 @@ import {
   INTERNAL_MESSAGE_CHANNEL,
 } from "../../utils/message-channel.js";
 import { AGENT_LANE_NESTED } from "../lanes.js";
-import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringParam } from "./common.js";
 import {
   createSessionVisibilityGuard,
@@ -218,6 +218,7 @@ export function createSessionsSendTool(opts?: {
         requesterSessionKey: opts?.agentSessionKey,
         requesterChannel: opts?.agentChannel,
         targetSessionKey: displayKey,
+        config: cfg,
       });
       const sendParams = {
         message,
@@ -303,8 +304,13 @@ export function createSessionsSendTool(opts?: {
 
       let waitStatus: string | undefined;
       let waitError: string | undefined;
+      let waitReply: string | undefined;
       try {
-        const wait = await callGateway<{ status?: string; error?: string }>({
+        const wait = await callGateway<{
+          status?: string;
+          error?: string;
+          finalAssistantText?: string;
+        }>({
           method: "agent.wait",
           params: {
             runId,
@@ -314,6 +320,10 @@ export function createSessionsSendTool(opts?: {
         });
         waitStatus = typeof wait?.status === "string" ? wait.status : undefined;
         waitError = typeof wait?.error === "string" ? wait.error : undefined;
+        waitReply =
+          typeof wait?.finalAssistantText === "string" && wait.finalAssistantText.trim()
+            ? wait.finalAssistantText
+            : undefined;
       } catch (err) {
         const messageText =
           err instanceof Error ? err.message : typeof err === "string" ? err : "error";
@@ -342,13 +352,18 @@ export function createSessionsSendTool(opts?: {
         });
       }
 
-      const history = await callGateway<{ messages: Array<unknown> }>({
-        method: "chat.history",
-        params: { sessionKey: resolvedKey, limit: 50 },
-      });
-      const filtered = stripToolMessages(Array.isArray(history?.messages) ? history.messages : []);
-      const last = filtered.length > 0 ? filtered[filtered.length - 1] : undefined;
-      const reply = last ? extractAssistantText(last) : undefined;
+      let reply = waitReply;
+      if (!reply) {
+        const history = await callGateway<{ messages: Array<unknown> }>({
+          method: "chat.history",
+          params: { sessionKey: resolvedKey, limit: 50 },
+        });
+        const filtered = stripToolMessages(
+          Array.isArray(history?.messages) ? history.messages : [],
+        );
+        const last = filtered.length > 0 ? filtered[filtered.length - 1] : undefined;
+        reply = last ? extractAssistantText(last) : undefined;
+      }
       startA2AFlow(reply ?? undefined);
 
       return jsonResult({
