@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import { createOpenClawTools } from "../agents/openclaw-tools.js";
 import {
   resolveEffectiveToolPolicy,
@@ -23,7 +24,6 @@ import { getPluginToolMeta } from "../plugins/tools.js";
 import { isSubagentSessionKey } from "../routing/session-key.js";
 import { DEFAULT_GATEWAY_HTTP_TOOL_DENY } from "../security/dangerous-tools.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
-import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import { authorizeGatewayConnect, type ResolvedGatewayAuth } from "./auth.js";
 import {
   readJsonBodyOrError,
@@ -36,6 +36,9 @@ import { getBearerToken, getHeader } from "./http-utils.js";
 
 const DEFAULT_BODY_BYTES = 2 * 1024 * 1024;
 const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_get"]);
+
+// IPs permitidos para ferramentas sensíveis (localhost apenas)
+const ALLOWED_IPS_FOR_SENSITIVE_TOOLS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 type ToolsInvokeBody = {
   tool?: unknown;
@@ -122,6 +125,18 @@ function isToolInputError(err: unknown): boolean {
     "name" in err &&
     (err as { name?: unknown }).name === "ToolInputError"
   );
+}
+
+/**
+ * Verifica se o IP do cliente está na whitelist para tools sensíveis
+ */
+function isIpAllowedForSensitiveTools(req: IncomingMessage): boolean {
+  const clientIp =
+    req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
+    req.socket?.remoteAddress ||
+    "unknown";
+
+  return ALLOWED_IPS_FOR_SENSITIVE_TOOLS.has(clientIp);
 }
 
 export async function handleToolsInvokeHttpRequest(
@@ -287,6 +302,23 @@ export async function handleToolsInvokeHttpRequest(
   const gatewayFiltered = subagentFiltered.filter((t) => !gatewayDenySet.has(t.name));
 
   const tool = gatewayFiltered.find((t) => t.name === toolName);
+
+  // Verificação especial para sessions_spawn/sessions_send com IP whitelist
+  if (toolName === "sessions_spawn" || toolName === "sessions_send") {
+    if (!isIpAllowedForSensitiveTools(req)) {
+      logWarn(`[SECURITY] Blocked ${toolName} from unauthorized IP`);
+      sendJson(res, 403, {
+        ok: false,
+        error: {
+          type: "forbidden",
+          message: `Tool ${toolName} only available from localhost`,
+        },
+      });
+      return true;
+    }
+    logWarn(`[SECURITY] Allowed ${toolName} from localhost`);
+  }
+
   if (!tool) {
     sendJson(res, 404, {
       ok: false,
